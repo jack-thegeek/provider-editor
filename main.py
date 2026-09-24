@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import shutil
 import socket
+import sys
 import urllib.error
 import urllib.request
 import webbrowser
@@ -60,7 +61,10 @@ def _find_free_port(start: int = 7788) -> int:
 async def lifespan(app: FastAPI):
     port = getattr(app.state, "port", None)
     if port:
-        webbrowser.open(f"http://127.0.0.1:{port}")
+        try:
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:
+            pass  # 无桌面/无默认浏览器时静默跳过
     yield
 
 
@@ -70,7 +74,9 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="OpenCode Providers Editor", lifespan=lifespan)
 
-STATIC_DIR = Path(__file__).parent / "static"
+# PyInstaller onefile 运行时，资源位于 sys._MEIPASS 临时解压目录
+BASE_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+STATIC_DIR = BASE_DIR / "static"
 
 
 # ---------------------------------------------------------------------------
@@ -171,6 +177,16 @@ def proxy_models(req: ProxyModelsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/shutdown")
+def shutdown():
+    """Stop the uvicorn server. 被网页端「退出」按钮调用。"""
+    server = getattr(app.state, "server", None)
+    if server is None:
+        raise HTTPException(status_code=409, detail="服务未以可关闭方式启动")
+    server.should_exit = True
+    return {"ok": True}
+
+
 # ---------------------------------------------------------------------------
 # Static files / SPA fallback
 # ---------------------------------------------------------------------------
@@ -188,8 +204,15 @@ def index():
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    port = _find_free_port(7788)
-    app.state.port = port
+    import os
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "0") or 0) or _find_free_port(7788)
+    if os.environ.get("OPEN_BROWSER", "1") == "1":
+        app.state.port = port  # 仅交互式启动时自动开浏览器
     print(f"✅  OpenCode Providers Editor running at http://127.0.0.1:{port}")
     print(f"📄  Config file: {CONFIG_PATH}")
-    uvicorn.run(app, host="127.0.0.1", port=port)
+    config = uvicorn.Config(app, host=host, port=port)
+    server = uvicorn.Server(config)
+    app.state.server = server  # 供 /api/shutdown 优雅关闭
+    server.run()

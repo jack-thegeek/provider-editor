@@ -154,6 +154,9 @@
     background: var(--accent);
     color: var(--accent-contrast);
   }
+  /* 退出按钮（红色调，与 tab-btn 同型） */
+  .exit-btn { color: var(--danger); }
+  .exit-btn:hover { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger-hover); }
 
   /* ── Layout ── */
   .workspace { display: flex; flex: 1; overflow: hidden; }
@@ -645,6 +648,7 @@
     <button class="tab-btn active" onclick="switchTab('visual')">可视化编辑</button>
     <button class="tab-btn" onclick="switchTab('raw')">原始 JSON</button>
   </div>
+  <button class="tab-btn exit-btn" onclick="shutdownServer()" title="停止服务并退出">退出</button>
 </header>
 
 <!-- ── Workspace ── -->
@@ -1130,6 +1134,21 @@ async function confirmAdd() {
 // ════════════════════════════════════════════════
 // Save
 // ════════════════════════════════════════════════
+// ════════════════════════════════════════════════
+// Shutdown（网页端退出按钮）
+// ════════════════════════════════════════════════
+async function shutdownServer() {
+  if (!confirm('确定要退出吗？服务停止后需重新启动才能继续使用。')) return;
+  try {
+    const res = await fetch('/api/shutdown', { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    showToast('服务已停止，可以关闭本页面了', 'success', 5000);
+    setTimeout(() => { try { window.close(); } catch (e) {} }, 600);
+  } catch (ex) {
+    showToast('退出失败: ' + ex.message, 'error');
+  }
+}
+
 async function save() {
   const btn = document.getElementById('save-btn');
   btn.disabled = true;

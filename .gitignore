@@ -7,3 +7,5 @@ venv/
 ENV/
 .env
 .DS_Store
+build/
+dist/
