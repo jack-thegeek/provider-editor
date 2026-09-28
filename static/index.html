@@ -261,6 +261,37 @@
   .provider-item.active .copy-btn:hover, .provider-item.active .del-btn:hover { opacity: 1; }
   .provider-item.active .copy-btn:hover { background: var(--accent-contrast); color: var(--accent); }
 
+  /* 启用/停用开关（放在复制/删除前） */
+  .provider-item .toggle {
+    position: relative;
+    width: 30px; height: 17px;
+    border-radius: 999px;
+    border: 1px solid var(--border-strong);
+    background: var(--surface3);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    transition: background .2s ease, border-color .2s ease;
+  }
+  .provider-item .toggle .knob {
+    position: absolute; top: 2px; left: 2px;
+    width: 11px; height: 11px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: transform .2s ease, background .2s ease;
+  }
+  .provider-item .toggle:hover { border-color: var(--muted); }
+  .provider-item .toggle.on { background: var(--accent); border-color: var(--accent); }
+  .provider-item .toggle.on .knob { transform: translateX(13px); background: var(--accent-contrast); }
+  /* 选中态（反色背景）下开关的适配 */
+  .provider-item.active .toggle { border-color: color-mix(in srgb, var(--accent-contrast) 45%, transparent); background: transparent; }
+  .provider-item.active .toggle .knob { background: var(--accent-contrast); }
+  .provider-item.active .toggle.on { background: var(--accent-contrast); border-color: var(--accent-contrast); }
+  .provider-item.active .toggle.on .knob { background: var(--accent); }
+  /* 停用 provider 的列表项弱化显示 */
+  .provider-item.disabled .name,
+  .provider-item.disabled .id { opacity: .5; }
+
   /* ── Main panel ── */
   main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 
@@ -823,7 +854,8 @@
 // State
 // ════════════════════════════════════════════════
 let fullConfig = {};       // complete opencode.json
-let providers = {};        // shorthand
+let providers = {};        // ALL providers (enabled + disabled merged)
+let disabledSet = new Set(); // ids of disabled providers
 let activeId = null;       // currently selected provider id
 let currentTab = 'visual'; // 'visual' | 'raw'
 
@@ -846,7 +878,10 @@ async function reload() {
   try {
     const res = await fetch('/api/config');
     fullConfig = await res.json();
-    providers = fullConfig.providers || {};
+    // 合并启用的（opencode.json）与停用的（sidecar）provider
+    const dp = await fetch('/api/providers').then(r => r.json());
+    providers   = Object.assign({}, dp.enabled || {}, dp.disabled || {});
+    disabledSet = new Set(Object.keys(dp.disabled || {}));
     renderList();
     if (activeId && providers[activeId]) {
       loadProvider(activeId);
@@ -876,24 +911,43 @@ function renderList() {
 
   filtered.forEach(id => {
     const p = providers[id];
+    const isDisabled = disabledSet.has(id);
     const div = document.createElement('div');
-    div.className = 'provider-item' + (id === activeId ? ' active' : '');
+    div.className = 'provider-item' + (id === activeId ? ' active' : '') + (isDisabled ? ' disabled' : '');
     div.innerHTML = `
       <div style="flex:1;min-width:0">
         <div class="name">${p.name || id}</div>
         <div class="id">${id}</div>
       </div>
+      <button class="toggle ${isDisabled ? '' : 'on'}" title="${isDisabled ? '已停用，点击启用' : '已启用，点击停用'}" onclick="toggleProvider(event,'${id}')"><span class="knob"></span></button>
       <div class="item-actions">
         <button class="copy-btn" title="复制此 Provider" onclick="openCopyModal(event,'${id}')">${icon('copy')}</button>
         <button class="del-btn"  title="删除此 Provider" onclick="deleteProvider(event,'${id}')">${icon('trash')}</button>
       </div>
     `;
     div.onclick = (e) => {
-      if (e.target.closest('.item-actions')) return;
+      if (e.target.closest('.item-actions') || e.target.closest('.toggle')) return;
       selectProvider(id);
     };
     list.appendChild(div);
   });
+}
+
+// ════════════════════════════════════════════════
+// Provider enable / disable（开关）
+// ════════════════════════════════════════════════
+async function toggleProvider(e, id) {
+  e.stopPropagation();
+  const enabling = disabledSet.has(id); // 当前停用 → 执行启用
+  try {
+    const res = await fetch(`/api/providers/${encodeURIComponent(id)}/${enabling ? 'enable' : 'disable'}`, { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    if (enabling) disabledSet.delete(id); else disabledSet.add(id);
+    renderList();
+    showToast(`已${enabling ? '启用' : '停用'} ${providers[id]?.name || id}`, 'success');
+  } catch(ex) {
+    showToast('操作失败: ' + ex.message, 'error');
+  }
 }
 
 // ════════════════════════════════════════════════
@@ -1156,13 +1210,23 @@ async function save() {
   try {
     if (currentTab === 'visual') {
       saveCurrentEdits();
-      fullConfig.providers = providers;
-      const res = await fetch('/api/config', {
+      // 启用的写进 opencode.json，停用的写进 sidecar
+      const enabled = {}, disabled = {};
+      Object.keys(providers).forEach(id => {
+        if (disabledSet.has(id)) disabled[id] = providers[id];
+        else enabled[id] = providers[id];
+      });
+      fullConfig.providers = enabled;
+      await fetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(fullConfig),
-      });
-      if (!res.ok) throw new Error(await res.text());
+      }).then(r => { if (!r.ok) throw new Error('保存配置失败'); });
+      await fetch('/api/providers/disabled', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(disabled),
+      }).then(r => { if (!r.ok) throw new Error('保存停用列表失败'); });
     } else {
       // raw mode
       const text = document.getElementById('raw-editor').value;
@@ -1177,6 +1241,10 @@ async function save() {
       if (!res.ok) throw new Error(await res.text());
       fullConfig = parsed;
       providers  = fullConfig.providers || {};
+      // 重新合并停用列表，避免列表丢失停用的 provider
+      const dp = await fetch('/api/providers').then(r => r.json());
+      Object.assign(providers, dp.disabled || {});
+      disabledSet = new Set(Object.keys(dp.disabled || {}));
       renderList();
     }
     setStatus('已保存 ' + new Date().toLocaleTimeString());
@@ -1204,7 +1272,10 @@ function switchTab(tab) {
   document.getElementById('view-raw').style.display    = tab === 'raw'    ? 'flex' : 'none';
   if (tab === 'raw') {
     saveCurrentEdits();
-    fullConfig.providers = providers;
+    // raw 视图只展示 opencode.json 里的内容（仅启用的 provider）
+    const enabled = {};
+    Object.keys(providers).forEach(id => { if (!disabledSet.has(id)) enabled[id] = providers[id]; });
+    fullConfig.providers = enabled;
     syncRawFromConfig();
   }
 }

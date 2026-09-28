@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import CONFIG_PATH
+from config import CONFIG_PATH, DISABLED_PATH
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -40,6 +40,23 @@ def _write_config(data: dict[str, Any]) -> None:
         shutil.copy2(CONFIG_PATH, backup)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _read_disabled() -> dict[str, Any]:
+    """读取停用 provider 列表（sidecar 文件，opencode 不会读取它）。"""
+    if not DISABLED_PATH.exists():
+        return {}
+    with open(DISABLED_PATH, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_disabled(data: dict[str, Any]) -> None:
+    if DISABLED_PATH.exists():
+        backup = DISABLED_PATH.with_suffix(".json.bak")
+        shutil.copy2(DISABLED_PATH, backup)
+    DISABLED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(DISABLED_PATH, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
@@ -102,9 +119,9 @@ async def put_config(request: Request):
 
 @app.get("/api/providers")
 def get_providers():
-    """Return only the providers section."""
+    """Return enabled providers (from config) and disabled providers (sidecar)."""
     cfg = _read_config()
-    return cfg.get("providers", {})
+    return {"enabled": cfg.get("providers", {}), "disabled": _read_disabled()}
 
 
 @app.put("/api/providers")
@@ -122,7 +139,7 @@ async def put_providers(request: Request):
 
 @app.post("/api/providers/{provider_id}")
 async def add_provider(provider_id: str, request: Request):
-    """Add or overwrite a single provider."""
+    """Add or overwrite a single provider (new providers are enabled)."""
     try:
         provider_data = await request.json()
     except Exception as exc:
@@ -130,19 +147,73 @@ async def add_provider(provider_id: str, request: Request):
     cfg = _read_config()
     cfg.setdefault("providers", {})[provider_id] = provider_data
     _write_config(cfg)
+    # 若该 ID 之前被停用，则从停用列表移除
+    disabled = _read_disabled()
+    if provider_id in disabled:
+        del disabled[provider_id]
+        _write_disabled(disabled)
     return {"ok": True, "id": provider_id}
+
+
+@app.post("/api/providers/{provider_id}/enable")
+def enable_provider(provider_id: str):
+    """启用 provider：从停用列表移回 opencode.json 的 providers。"""
+    disabled = _read_disabled()
+    cfg = _read_config()
+    provider = disabled.pop(provider_id, None)
+    if provider is not None:
+        cfg.setdefault("providers", {})[provider_id] = provider
+        _write_config(cfg)
+        _write_disabled(disabled)
+    elif provider_id not in cfg.get("providers", {}):
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    return {"ok": True, "id": provider_id, "enabled": True}
+
+
+@app.post("/api/providers/{provider_id}/disable")
+def disable_provider(provider_id: str):
+    """停用 provider：从 opencode.json 移入停用列表。"""
+    cfg = _read_config()
+    providers = cfg.get("providers", {})
+    provider = providers.pop(provider_id, None)
+    if provider is None:
+        # 可能已是停用状态，幂等返回
+        disabled = _read_disabled()
+        if provider_id in disabled:
+            return {"ok": True, "id": provider_id, "enabled": False}
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    disabled = _read_disabled()
+    disabled[provider_id] = provider
+    cfg["providers"] = providers
+    _write_config(cfg)
+    _write_disabled(disabled)
+    return {"ok": True, "id": provider_id, "enabled": False}
+
+
+@app.put("/api/providers/disabled")
+async def put_disabled_providers(request: Request):
+    """Replace the entire disabled-providers section (sidecar)."""
+    try:
+        disabled = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+    _write_disabled(disabled)
+    return {"ok": True}
 
 
 @app.delete("/api/providers/{provider_id}")
 def delete_provider(provider_id: str):
-    """Delete a single provider."""
+    """Delete a single provider (from both enabled and disabled lists)."""
     cfg = _read_config()
     providers = cfg.get("providers", {})
-    if provider_id not in providers:
+    disabled = _read_disabled()
+    if provider_id not in providers and provider_id not in disabled:
         raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
-    del providers[provider_id]
+    providers.pop(provider_id, None)
+    disabled.pop(provider_id, None)
     cfg["providers"] = providers
     _write_config(cfg)
+    _write_disabled(disabled)
     return {"ok": True}
 
 

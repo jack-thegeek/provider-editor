@@ -22,3 +22,6 @@ def get_config_path() -> Path:
 
 
 CONFIG_PATH: Path = get_config_path()
+
+# 停用 provider 的存放位置（与 opencode.json 同目录，opencode 不会读取它）
+DISABLED_PATH: Path = CONFIG_PATH.with_name("opencode.disabled.json")

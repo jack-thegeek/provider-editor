@@ -5,6 +5,7 @@
 ## 特性
 
 - 🗂️ Provider 列表 + 快速搜索
+- 🔘 启用/停用开关（启用的写入 opencode.json，停用的存到独立文件）
 - ✏️ 可视化表单编辑（名称、API Key、Base URL、Models）
 - ➕ 新增 / 🗑️ 删除 Provider
 - 📝 原始 JSON 编辑器（实时校验）

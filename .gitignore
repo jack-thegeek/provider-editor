@@ -7,5 +7,6 @@ venv/
 ENV/
 .env
 .DS_Store
+.codegraph/
 build/
 dist/
