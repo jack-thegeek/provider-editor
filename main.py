@@ -21,6 +21,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from config import CONFIG_PATH, DISABLED_PATH
+import codex as codex_cfg
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -121,7 +122,11 @@ async def put_config(request: Request):
 def get_providers():
     """Return enabled providers (from config) and disabled providers (sidecar)."""
     cfg = _read_config()
-    return {"enabled": cfg.get("providers", {}), "disabled": _read_disabled()}
+    return {
+        "enabled": cfg.get("providers", {}),
+        "disabled": _read_disabled(),
+        "configPath": str(CONFIG_PATH),
+    }
 
 
 @app.put("/api/providers")
@@ -215,6 +220,109 @@ def delete_provider(provider_id: str):
     _write_config(cfg)
     _write_disabled(disabled)
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Codex Routes  ——  ~/.codex/config.toml (TOML) + auth.json
+# 切换模式：provider 全部以 [model_providers.*] 共存，model_provider 指向唯一激活项
+# ---------------------------------------------------------------------------
+
+def _codex_save(providers: dict, active: str | None, model: str) -> dict:
+    try:
+        codex_cfg.write_state(providers, active, model)
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=500, detail=f"写入失败: {exc}")
+    state = codex_cfg.read_state()
+    state["configPath"] = str(codex_cfg.CONFIG_PATH)
+    return state
+
+
+@app.get("/api/codex/config")
+def codex_get_config():
+    """Return config.toml as raw text (原始 TOML 视图)。"""
+    return {"text": codex_cfg.read_raw()}
+
+
+@app.put("/api/codex/config")
+async def codex_put_config(request: Request):
+    """Replace config.toml wholesale. 写入前用 tomllib 校验。"""
+    try:
+        text = (await request.json()).get("text", "")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+    err = codex_cfg.validate(text)
+    if err:
+        raise HTTPException(status_code=400, detail=f"TOML 格式错误：{err}")
+    try:
+        codex_cfg.write_raw(text)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"写入失败: {exc}")
+    return {"ok": True}
+
+
+@app.get("/api/codex/providers")
+def codex_get_providers():
+    state = codex_cfg.read_state()
+    state["configPath"] = str(codex_cfg.CONFIG_PATH)
+    return state
+
+
+@app.put("/api/codex/providers")
+async def codex_put_providers(request: Request):
+    """Full-state write: providers + which one is active + the top-level model."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+    return _codex_save(body.get("providers") or {}, body.get("active"), body.get("model") or "")
+
+
+@app.post("/api/codex/providers/{provider_id}")
+async def codex_add_provider(provider_id: str, request: Request):
+    """Add or overwrite a single provider."""
+    try:
+        provider = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+    state = codex_cfg.read_state()
+    # 认证方式与 key 归档全由 write_state 接管，这里不要碰
+    state["providers"][provider_id] = provider
+    return _codex_save(state["providers"], state["active"], state["model"])
+
+
+@app.post("/api/codex/providers/{provider_id}/enable")
+def codex_enable_provider(provider_id: str):
+    """激活：把顶层 model_provider 指向它（其余自动变为未激活）。"""
+    state = codex_cfg.read_state()
+    if provider_id not in state["providers"]:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    return _codex_save(state["providers"], provider_id, state["model"])
+
+
+@app.post("/api/codex/providers/{provider_id}/disable")
+def codex_disable_provider(provider_id: str):
+    """停用：段落保留，仅把激活指针移到别的 provider。"""
+    state = codex_cfg.read_state()
+    providers = state["providers"]
+    if provider_id not in providers:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    if state["active"] == provider_id:
+        others = [pid for pid in providers if pid != provider_id]
+        if not others:
+            # 全部停用会让 codex 不可用，至少保留一个
+            raise HTTPException(status_code=400, detail="至少保留一个激活的 provider")
+        return _codex_save(providers, others[0], state["model"])
+    return state
+
+
+@app.delete("/api/codex/providers/{provider_id}")
+def codex_delete_provider(provider_id: str):
+    """Delete a provider section. 若删的是激活项，指针自动回退。"""
+    state = codex_cfg.read_state()
+    if provider_id not in state["providers"]:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_id}' not found")
+    del state["providers"][provider_id]
+    return _codex_save(state["providers"], state["active"], state["model"])
 
 
 class ProxyModelsRequest(BaseModel):

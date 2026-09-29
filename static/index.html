@@ -348,6 +348,18 @@
   .models-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
   .models-header span { font-size: 13px; color: var(--muted); }
   .models-actions { display: flex; gap: 8px; }
+
+  /* codex：标记当前生效模型的行 + 它的「设为当前」按钮 */
+  .model-row.active { background: color-mix(in srgb, var(--accent) 7%, var(--surface)); border-color: var(--accent); }
+  .pick-btn {
+    display: inline-flex; align-items: center; gap: 4px; flex: none;
+    padding: 5px 12px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border-strong); background: var(--surface);
+    color: var(--muted); font-size: 12px; white-space: nowrap;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .pick-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .pick-btn.on { background: var(--accent); border-color: var(--accent); color: #fff; cursor: default; }
   .btn-sm {
     padding: 6px 14px;
     border-radius: 999px;
@@ -670,6 +682,10 @@
     <h1>Provider Editor</h1>
   </div>
   <span class="meta" id="config-path-label"></span>
+  <div class="tab-bar" id="target-bar" role="tablist" aria-label="配置目标">
+    <button class="tab-btn active" onclick="switchTarget('opencode')" title="~/.config/opencode/opencode.json（可多选启用）">OpenCode</button>
+    <button class="tab-btn" onclick="switchTarget('codex')" title="~/.codex/config.toml（同一时刻仅一个生效）">Codex</button>
+  </div>
   <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" aria-label="切换主题" title="切换浅色 / 深色主题">
     <span class="theme-ico theme-ico-moon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></span>
     <span class="theme-thumb"></span>
@@ -677,7 +693,7 @@
   </button>
   <div class="tab-bar">
     <button class="tab-btn active" onclick="switchTab('visual')">可视化编辑</button>
-    <button class="tab-btn" onclick="switchTab('raw')">原始 JSON</button>
+    <button class="tab-btn" onclick="switchTab('raw')" id="raw-tab-label">原始 JSON</button>
   </div>
   <button class="tab-btn exit-btn" onclick="shutdownServer()" title="停止服务并退出">退出</button>
 </header>
@@ -724,10 +740,20 @@
               <label>显示名称</label>
               <input id="f-name" type="text" placeholder="e.g. My Provider" />
             </div>
-            <div class="form-row">
+            <div class="form-row" id="row-package">
               <label>Package</label>
               <input id="f-package" type="text" class="wide" value="@opencode/ai/providers/openai-compatible" />
             </div>
+            <!-- codex 用 Wire API 占 Package 的位置 -->
+            <div class="form-row" id="row-wireapi" style="display:none">
+              <!-- 占 Package 的位置：codex 用 wire_api 取代 package -->
+              <label>Wire API</label>
+              <select id="f-wireapi">
+                <option value="responses">responses（OpenAI Responses）</option>
+                <option value="chat">chat（Chat Completions）</option>
+              </select>
+            </div>
+            <!-- codex 的生效模型不再是独立字段，而是下方「模型」卡片里被标记的那一行 -->
           </div>
         </div>
 
@@ -736,6 +762,9 @@
           <div class="card-body">
             <div class="form-row">
               <label>API Key</label>
+              <!-- codex 也会填这里。codex 不把 key 写进 config.toml，而是走
+                   auth.json 的 OPENAI_API_KEY（配合 requires_openai_auth = true）；
+                   env_key 那条路走不通（它只查进程环境变量），见 codex.py 顶部注释 -->
               <input id="f-apikey" type="text" class="wide" placeholder="sk-…" />
             </div>
             <div class="form-row">
@@ -745,7 +774,7 @@
           </div>
         </div>
 
-        <div class="card">
+        <div class="card" id="models-card">
           <div class="card-header">模型</div>
           <div class="card-body">
             <div class="models-header">
@@ -784,7 +813,7 @@
     <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新增 Provider</h3>
     <div class="form-row"><label>ID（键名）</label><input id="m-id" type="text" placeholder="my-provider" /></div>
     <div class="form-row"><label>名称</label><input id="m-name" type="text" placeholder="My Provider" /></div>
-    <div class="form-row"><label>Package</label><input id="m-package" type="text" value="@opencode/ai/providers/openai-compatible" /></div>
+    <div class="form-row" id="m-package-row"><label>Package</label><input id="m-package" type="text" value="@opencode/ai/providers/openai-compatible" /></div>
     <div class="form-row"><label>API Key</label><input id="m-apikey" type="text" placeholder="sk-…" /></div>
     <div class="form-row"><label>Base URL</label><input id="m-baseurl" type="text" placeholder="https://…/v1" /></div>
     <div class="modal-actions">
@@ -864,11 +893,52 @@ let disabledSet = new Set(); // ids of disabled providers
 let activeId = null;       // currently selected provider id
 let currentTab = 'visual'; // 'visual' | 'raw'
 
+// Codex 专有
+let target = 'opencode';   // 'opencode' | 'codex'
+let codexModel = '';       // codex 顶层 model
+let rawToml = '';          // codex 原始 config.toml 文本
+
+// provider/config 类接口按目标切换前缀；/api/proxy、/api/shutdown 是共用的
+const P = p => target === 'codex' ? '/api/codex' + p : '/api' + p;
+const isCodex = () => target === 'codex';
+
 // ════════════════════════════════════════════════
 // Init
 // ════════════════════════════════════════════════
 async function init() {
+  applyTargetUI();
   await reload();
+}
+
+function switchTarget(next) {
+  if (next === target) return;
+  target = next;
+  currentTab = 'visual';
+  activeId = null;
+  document.querySelectorAll('#target-bar .tab-btn').forEach(b => {
+    b.classList.toggle('active', b.textContent.toLowerCase() === next);
+  });
+  applyTargetUI();
+  reload();
+}
+
+// 表单里 opencode 独有 / codex 独有的字段切换显示
+// 注：codex 的认证方式（requires_openai_auth）与 key 归档都不在界面上，
+//     由 codex.py 的 write_state() 固定接管，见那里的模块注释
+function applyTargetUI() {
+  const codex = isCodex();
+  document.getElementById('row-package').style.display  = codex ? 'none' : '';
+  document.getElementById('m-package-row').style.display = codex ? 'none' : '';
+  document.getElementById('row-wireapi').style.display = codex ? '' : 'none';
+  document.getElementById('raw-tab-label').textContent = codex ? '原始 TOML' : '原始 JSON';
+}
+
+// codex 状态：providers + 当前激活项 + 顶层 model
+function applyCodexState(s) {
+  providers   = s.providers || {};
+  codexModel  = s.model || '';
+  disabledSet = new Set(Object.keys(providers).filter(id => id !== s.active));
+  document.getElementById('config-path-label').textContent = s.configPath || '';
 }
 
 // ── 主题切换 ──
@@ -881,12 +951,16 @@ function toggleTheme() {
 
 async function reload() {
   try {
-    const res = await fetch('/api/config');
-    fullConfig = await res.json();
-    // 合并启用的（opencode.json）与停用的（sidecar）provider
-    const dp = await fetch('/api/providers').then(r => r.json());
-    providers   = Object.assign({}, dp.enabled || {}, dp.disabled || {});
-    disabledSet = new Set(Object.keys(dp.disabled || {}));
+    if (isCodex()) {
+      applyCodexState(await fetch(P('/providers')).then(r => r.json()));
+    } else {
+      fullConfig = await fetch('/api/config').then(r => r.json());
+      // 合并启用的（opencode.json）与停用的（sidecar）provider
+      const dp = await fetch('/api/providers').then(r => r.json());
+      providers   = Object.assign({}, dp.enabled || {}, dp.disabled || {});
+      disabledSet = new Set(Object.keys(dp.disabled || {}));
+      document.getElementById('config-path-label').textContent = dp.configPath || '';
+    }
     renderList();
     if (activeId && providers[activeId]) {
       loadProvider(activeId);
@@ -936,7 +1010,7 @@ function renderList() {
         <button class="copy-btn" title="复制此 Provider" onclick="openCopyModal(event,'${id}')">${icon('copy')}</button>
         <button class="del-btn"  title="删除此 Provider" onclick="deleteProvider(event,'${id}')">${icon('trash')}</button>
       </div>
-      <button class="toggle ${isDisabled ? '' : 'on'}" title="${isDisabled ? '已停用，点击启用' : '已启用，点击停用'}" onclick="toggleProvider(event,'${id}')"><span class="knob"></span></button>
+      <button class="toggle ${isDisabled ? '' : 'on'}" title="${isDisabled ? (isCodex() ? '未激活，点击切换到此' : '已停用，点击启用') : (isCodex() ? '当前生效，codex 同时只激活一个' : '已启用，点击停用')}" onclick="toggleProvider(event,'${id}')"><span class="knob"></span></button>
     `;
     div.onclick = (e) => {
       if (e.target.closest('.item-actions') || e.target.closest('.toggle')) return;
@@ -951,13 +1025,22 @@ function renderList() {
 // ════════════════════════════════════════════════
 async function toggleProvider(e, id) {
   e.stopPropagation();
-  const enabling = disabledSet.has(id); // 当前停用 → 执行启用
+  const enabling = disabledSet.has(id); // 当前未激活 → 执行激活
   try {
-    const res = await fetch(`/api/providers/${encodeURIComponent(id)}/${enabling ? 'enable' : 'disable'}`, { method: 'POST' });
-    if (!res.ok) throw new Error(await res.text());
-    if (enabling) disabledSet.delete(id); else disabledSet.add(id);
-    renderList();
-    showToast(`已${enabling ? '启用' : '停用'} ${providers[id]?.name || id}`, 'success');
+    const res = await fetch(`${P(`/providers/${encodeURIComponent(id)}/${enabling ? 'enable' : 'disable'}`)}`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || await res.text());
+    if (isCodex()) {
+      // 激活指针会整体易主，信任后端返回的新状态
+      applyCodexState(data);
+      if (activeId && !providers[activeId]) activeId = null;
+      renderList();
+      if (activeId) loadProvider(activeId); else showEmptyState();
+    } else {
+      if (enabling) disabledSet.delete(id); else disabledSet.add(id);
+      renderList();
+    }
+    showToast(`已${enabling ? (isCodex() ? '激活' : '启用') : (isCodex() ? '取消激活' : '停用')} ${providers[id]?.name || id}`, 'success');
   } catch(ex) {
     showToast('操作失败: ' + ex.message, 'error');
   }
@@ -988,8 +1071,19 @@ function loadProvider(id) {
   const s = p.settings || {};
   document.getElementById('f-apikey').value  = s.apiKey  || '';
   document.getElementById('f-baseurl').value = s.baseURL || '';
+  document.getElementById('f-wireapi').value = s.wireApi || 'responses';
 
-  renderModels(p.models || {});
+  // codex：顶层 model 单独渲染进模型卡片，标出当前生效项
+  if (isCodex()) renderModels(withCurrentModel(p.models || {}));
+  else renderModels(p.models || {});
+}
+
+// 保证 codex 当前生效的模型出现在候选列表里（不改动入参）
+function withCurrentModel(models) {
+  if (codexModel && !models[codexModel]) {
+    return { ...models, [codexModel]: {} };
+  }
+  return models;
 }
 
 function showEmptyState() {
@@ -1006,21 +1100,58 @@ function renderModels(models) {
   const entries = Object.entries(models);
   document.getElementById('model-count').textContent = entries.length + ' 个模型';
   entries.forEach(([modelId, meta]) => {
-    container.appendChild(makeModelRow(modelId, meta.name || ''));
+    const row = makeModelRow(modelId, meta.name || '');
+    // codex：标出当前生效的那一行
+    if (isCodex() && modelId === codexModel) {
+      row.classList.add('active');
+      const btn = row.querySelector('.pick-btn');
+      if (btn) { btn.classList.add('on'); btn.querySelector('span').textContent = '当前生效'; }
+    }
+    container.appendChild(row);
   });
 }
 
 function makeModelRow(modelId, displayName) {
   const row = document.createElement('div');
   row.className = 'model-row';
+  // codex 侧每行多一个「设为当前」按钮 —— 顶层 model 是全局单值，指向当前生效的模型。
+  // 注意不加 btn-sm：那套样式排在 .pick-btn 之后，会把背景覆盖掉。
+  const activeBtn = isCodex()
+    ? `<button class="pick-btn" title="设为当前生效的模型" onclick="pickActiveModel(this)">${icon('check', 'ico-xs')}<span>当前</span></button>`
+    : '';
   row.innerHTML = `
     <label>Model ID</label>
     <input type="text" class="model-id" value="${escHtml(modelId)}" placeholder="model-id" />
     <label style="margin-left:28px">别名</label>
     <input type="text" class="model-name" value="${escHtml(displayName)}" placeholder="（可选）" />
+    ${activeBtn}
     <button class="btn-sm danger" onclick="this.closest('.model-row').remove(); updateModelCount()">${icon('trash','ico-xs')}</button>
   `;
   return row;
+}
+
+// codex：把某一行设为顶层 model（当前生效），并刷新所有行的状态
+function pickActiveModel(btn) {
+  const id = btn.closest('.model-row').querySelector('.model-id').value.trim();
+  if (!id) { showToast('该行还没有 Model ID', 'error'); return; }
+  codexModel = id;
+  renderModels(collectModels());
+  showToast(`当前模型 → ${id}`, 'success');
+}
+
+// 收集模型行（两个目标共用；codex 额外确保当前模型一定在列表里）
+function collectModels() {
+  const models = {};
+  document.querySelectorAll('.model-row').forEach(row => {
+    const mid   = row.querySelector('.model-id').value.trim();
+    const mname = row.querySelector('.model-name').value.trim();
+    if (mid) models[mid] = mname ? { name: mname } : {};
+  });
+  if (isCodex() && codexModel && !models[codexModel]) {
+    // 激活的模型可能不在候选列表里（例如手工写的、或上游已下架），补一行并标出
+    models[codexModel] = {};
+  }
+  return models;
 }
 
 function addModelRow() {
@@ -1046,20 +1177,35 @@ function updateModelCount() {
 // ════════════════════════════════════════════════
 function collectCurrentProvider() {
   if (!activeId) return null;
-  const models = {};
-  document.querySelectorAll('.model-row').forEach(row => {
-    const mid  = row.querySelector('.model-id').value.trim();
-    const mname = row.querySelector('.model-name').value.trim();
-    if (mid) models[mid] = mname ? { name: mname } : {};
-  });
+  const s = {
+    apiKey:  document.getElementById('f-apikey').value.trim(),
+    baseURL: document.getElementById('f-baseurl').value.trim(),
+  };
+  const name = document.getElementById('f-name').value.trim();
+
+  // Codex 侧刻意只有 3 个 settings 字段。
+  // API Key 同样填在这里，但 codex 不把它写进 config.toml —— 它落到
+  // auth.json 的 OPENAI_API_KEY，段里配 requires_openai_auth = true。
+  // 各 provider 的 key 全量存在 codex.keys.json，切换时改写 auth.json 那个槽位。
+  // 顶层 model 是全局单值，不属于某个 provider。
+  if (isCodex()) {
+    return {
+      name,
+      settings: {
+        apiKey:  s.apiKey,
+        baseURL: s.baseURL,
+        wireApi: document.getElementById('f-wireapi').value,
+      },
+      // 候选列表落到 sidecar（codex.models.json）；真正生效的是顶层 model
+      models: collectModels(),
+    };
+  }
+
   return {
-    name:    document.getElementById('f-name').value.trim(),
+    name,
     package: document.getElementById('f-package').value.trim(),
-    settings: {
-      apiKey:  document.getElementById('f-apikey').value.trim(),
-      baseURL: document.getElementById('f-baseurl').value.trim(),
-    },
-    models,
+    settings: s,
+    models: collectModels(),
   };
 }
 
@@ -1092,8 +1238,8 @@ async function deleteProvider(e, id) {
   e.stopPropagation();
   if (!confirm(`确定删除 Provider「${providers[id]?.name || id}」吗？`)) return;
   try {
-    const res = await fetch(`/api/providers/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!res.ok) throw new Error(await res.text());
+    const res = await fetch(P(`/providers/${encodeURIComponent(id)}`), { method: 'DELETE' });
+    if (!res.ok) throw new Error((await res.json()).detail || await res.text());
     delete providers[id];
     if (activeId === id) { activeId = null; showEmptyState(); }
     renderList();
@@ -1159,14 +1305,16 @@ async function confirmCopy() {
   // Deep-clone the source, apply new name
   const cloned = JSON.parse(JSON.stringify(providers[copySourceId]));
   if (newName) cloned.name = newName;
+  // codex 侧不需要特殊处理：key 随副本一起走是合理的（复制本就是同一套凭据换个名），
+  // auth.json 那个槽位由后端按 active 项决定，副本不激活就不会污染。
 
   try {
-    const res = await fetch(`/api/providers/${encodeURIComponent(newId)}`, {
+    const res = await fetch(P(`/providers/${encodeURIComponent(newId)}`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(cloned),
     });
-    if (!res.ok) throw new Error(await res.text());
+    if (!res.ok) throw new Error((await res.json()).detail || await res.text());
     providers[newId] = cloned;
     closeCopyModal();
     renderList();
@@ -1204,15 +1352,18 @@ async function confirmAdd() {
   if (!id) { alert('ID 不能为空'); return; }
   if (!name) { alert('名称不能为空'); return; }
 
-  const body = { name, package: pkg, settings: { apiKey, baseURL }, models: {} };
+  const body = isCodex()
+    ? { name, settings: { apiKey, baseURL, wireApi: 'responses' } }
+    : { name, package: pkg, settings: { apiKey, baseURL }, models: {} };
   try {
-    const res = await fetch(`/api/providers/${encodeURIComponent(id)}`, {
+    const res = await fetch(P(`/providers/${encodeURIComponent(id)}`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(await res.text());
-    providers[id] = body;
+    if (!res.ok) throw new Error((await res.json()).detail || await res.text());
+    // codex：后端接管认证与 key 归档，并回传完整状态（含 configPath）
+    if (isCodex()) applyCodexState(await res.json()); else providers[id] = body;
     closeAddModal();
     renderList();
     selectProvider(id);
@@ -1245,7 +1396,26 @@ async function save() {
   btn.disabled = true;
 
   try {
-    if (currentTab === 'visual') {
+    if (currentTab === 'raw') {
+      await saveRaw();
+    } else if (isCodex()) {
+      saveCurrentEdits();
+      const res = await fetch(P('/providers'), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          providers,
+          active: [...disabledSet].length === Object.keys(providers).length ? null
+            : Object.keys(providers).find(id => !disabledSet.has(id)) ?? null,
+          model: codexModel,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || '保存失败');
+      applyCodexState(data);
+      renderList();
+      loadProvider(activeId);
+    } else {
       saveCurrentEdits();
       // 启用的写进 opencode.json，停用的写进 sidecar
       const enabled = {}, disabled = {};
@@ -1264,25 +1434,6 @@ async function save() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(disabled),
       }).then(r => { if (!r.ok) throw new Error('保存停用列表失败'); });
-    } else {
-      // raw mode
-      const text = document.getElementById('raw-editor').value;
-      let parsed;
-      try { parsed = JSON.parse(text); }
-      catch(e) { showToast('JSON 格式错误，无法保存', 'error'); btn.disabled=false; return; }
-      const res = await fetch('/api/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(parsed),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      fullConfig = parsed;
-      providers  = fullConfig.providers || {};
-      // 重新合并停用列表，避免列表丢失停用的 provider
-      const dp = await fetch('/api/providers').then(r => r.json());
-      Object.assign(providers, dp.disabled || {});
-      disabledSet = new Set(Object.keys(dp.disabled || {}));
-      renderList();
     }
     setStatus('已保存 ' + new Date().toLocaleTimeString());
     showToast('保存成功', 'success');
@@ -1290,6 +1441,39 @@ async function save() {
     showToast('保存失败: ' + ex.message, 'error');
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function saveRaw() {
+  const text = document.getElementById('raw-editor').value;
+  if (isCodex()) {
+    // 原始视图直接改 config.toml 全文，服务端用 tomllib 校验后才落盘
+    const res = await fetch(P('/config'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || '保存失败');
+    rawToml = text;
+    await reload();
+  } else {
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch(e) { throw new Error('JSON 格式错误，无法保存'); }
+    const res = await fetch('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(parsed),
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || '保存失败');
+    fullConfig = parsed;
+    providers  = fullConfig.providers || {};
+    // 重新合并停用列表，避免列表丢失停用的 provider
+    const dp = await fetch('/api/providers').then(r => r.json());
+    Object.assign(providers, dp.disabled || {});
+    disabledSet = new Set(Object.keys(dp.disabled || {}));
+    renderList();
   }
 }
 
@@ -1302,13 +1486,22 @@ function setStatus(msg) {
 // ════════════════════════════════════════════════
 function switchTab(tab) {
   currentTab = tab;
-  document.querySelectorAll('.tab-btn').forEach((b,i) => {
+  document.querySelectorAll('.tab-bar:not(#target-bar) .tab-btn').forEach((b,i) => {
     b.classList.toggle('active', (tab==='visual' && i===0) || (tab==='raw' && i===1));
   });
   document.getElementById('view-visual').style.display = tab === 'visual' ? 'flex' : 'none';
   document.getElementById('view-raw').style.display    = tab === 'raw'    ? 'flex' : 'none';
   if (tab === 'raw') {
     saveCurrentEdits();
+    if (isCodex()) {
+      // codex：直接展示 config.toml 全文（含 mcp_servers、projects 等本工具不管理的段）
+      fetch(P('/config')).then(r => r.json()).then(d => {
+        rawToml = d.text || '';
+        document.getElementById('raw-editor').value = rawToml;
+        setRawStatus('config.toml 原文 — 保存时由服务端校验 TOML', '');
+      }).catch(e => setRawStatus('加载失败: ' + e.message, 'err'));
+      return;
+    }
     // raw 视图只展示 opencode.json 里的内容（仅启用的 provider）
     const enabled = {};
     Object.keys(providers).forEach(id => { if (!disabledSet.has(id)) enabled[id] = providers[id]; });
@@ -1322,21 +1515,31 @@ function syncRawFromConfig() {
   validateRaw();
 }
 
+function setRawStatus(msg, cls) {
+  const s = document.getElementById('raw-status');
+  s.textContent = msg;
+  s.className = 'raw-status' + (cls ? ' ' + cls : '');
+}
+
 // ════════════════════════════════════════════════
 // Raw editor
 // ════════════════════════════════════════════════
-function onRawInput() { validateRaw(); }
+function onRawInput() {
+  if (isCodex()) {
+    setRawStatus(rawToml === document.getElementById('raw-editor').value
+      ? '未改动' : '已改动 — 按「保存」写入 config.toml', rawToml === document.getElementById('raw-editor').value ? '' : 'ok');
+  } else {
+    validateRaw();
+  }
+}
 
 function validateRaw() {
   const text   = document.getElementById('raw-editor').value;
-  const status = document.getElementById('raw-status');
   try {
     JSON.parse(text);
-    status.textContent = 'JSON 合法';
-    status.className   = 'raw-status ok';
+    setRawStatus('JSON 合法', 'ok');
   } catch(e) {
-    status.textContent = e.message;
-    status.className   = 'raw-status err';
+    setRawStatus(e.message, 'err');
   }
 }
 
@@ -1372,9 +1575,12 @@ const ICON_PATHS = {
   copy:  '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
   trash: '<path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/>',
   x:     '<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
+  check: '<polyline points="20 6 9 17 4 12"/>',
 };
 function icon(name, cls='ico') {
-  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${ICON_PATHS[name]}</svg>`;
+  const d = ICON_PATHS[name];
+  if (!d) { console.warn('未知图标名:', name); return ''; }
+  return `<svg class="${cls}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
 }
 
 function escHtml(s) {
