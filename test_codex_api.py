@@ -198,5 +198,137 @@ class CodexApiTest(unittest.TestCase):
         self.assertEqual(r["providers"]["aerolink"]["models"], {})
 
 
+OPENCODE_SRC = {
+    "providers": {
+        "huoshan": {
+            "name": "Huoshan",
+            "package": "@opencode/ai/providers/openai-compatible",
+            "settings": {"apiKey": "ark-src", "baseURL": "https://ark.example.com/api/coding/v3"},
+            "models": {"deepseek-v4-flash": {"name": "Flash"}, "glm-5.3-flash": {}},
+        },
+        "nokey": {
+            "name": "NoKey",
+            "settings": {"baseURL": "https://nokey.example.com/v1"},
+        },
+    }
+}
+DISABLED_SRC = {
+    "legacy-off": {
+        "name": "Legacy Off",
+        "settings": {"apiKey": "sk-off", "baseURL": "https://off.example.com/v1"},
+        "models": {},
+    }
+}
+
+
+class CodexImportTest(unittest.TestCase):
+    """从 opencode 导入到 codex。两个配置路径都要沙箱化。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.cfg = d / "config.toml"
+        self.auth = d / "auth.json"
+        self.keys_path = d / "codex.keys.json"
+        self.models_path = d / "codex.models.json"
+        codex.CONFIG_PATH, codex.AUTH_PATH = self.cfg, self.auth
+        codex.MODELS_PATH, codex.KEYS_PATH = self.models_path, self.keys_path
+        self.cfg.write_text(ORIGINAL, encoding="utf-8")
+        self.auth.write_text('{"OPENAI_API_KEY": "sk-real"}', encoding="utf-8")
+
+        self.oc = d / "opencode.json"
+        self.oc_disabled = d / "opencode.disabled.json"
+        self.oc.write_text(json.dumps(OPENCODE_SRC), encoding="utf-8")
+        self.oc_disabled.write_text(json.dumps(DISABLED_SRC), encoding="utf-8")
+        main.CONFIG_PATH, main.DISABLED_PATH = self.oc, self.oc_disabled
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _import(self, items, **kw):
+        return asyncio.run(main.codex_import(FakeRequest({"items": items, **kw})))
+
+    def _add(self, pid, body):
+        return asyncio.run(main.codex_add_provider(pid, FakeRequest(body)))
+
+    def _doc(self):
+        return tomllib.loads(self.cfg.read_text(encoding="utf-8"))
+
+    # ── 候选清单 ──
+    def test_candidates_cover_enabled_and_disabled(self):
+        ids = [i["id"] for i in main.codex_import_candidates()["items"]]
+        self.assertEqual(ids, ["huoshan", "legacy-off", "nokey"])  # 含停用 sidecar 里的
+
+    def test_candidates_never_expose_the_key(self):
+        raw = json.dumps(main.codex_import_candidates())
+        self.assertNotIn("ark-src", raw)
+        item = next(i for i in main.codex_import_candidates()["items"] if i["id"] == "huoshan")
+        self.assertTrue(item["hasKey"])
+        self.assertFalse(next(i for i in main.codex_import_candidates()["items"] if i["id"] == "nokey")["hasKey"])
+
+    def test_candidates_flag_name_collisions(self):
+        items = {i["id"]: i for i in main.codex_import_candidates()["items"]}
+        self.assertFalse(items["huoshan"]["exists"])   # codex 侧叫 aerolink
+        self.assertEqual(items["legacy-off"]["modelCount"], 0)
+        self.assertEqual(items["huoshan"]["modelCount"], 2)
+
+    # ── 导入 ──
+    def test_import_maps_every_field(self):
+        r = self._import([{"id": "huoshan", "wireApi": "chat"}])
+        self.assertEqual(r["imported"], ["huoshan"])
+        tbl = self._doc()["model_providers"]["huoshan"]
+        self.assertEqual(tbl["name"], "Huoshan")
+        self.assertEqual(tbl["base_url"], "https://ark.example.com/api/coding/v3")  # 不改写
+        self.assertEqual(tbl["wire_api"], "chat")
+        self.assertIs(tbl["requires_openai_auth"], True)
+        self.assertNotIn("env_key", tbl)
+        # key 进了存档（未激活，不占 auth.json 槽位）；模型进了 models sidecar
+        self.assertEqual(json.loads(self.keys_path.read_text())["huoshan"], "ark-src")
+        self.assertEqual(json.loads(self.auth.read_text())["OPENAI_API_KEY"], "sk-real")
+        self.assertEqual(sorted(r["providers"]["huoshan"]["models"]), ["deepseek-v4-flash", "glm-5.3-flash"])
+
+    def test_import_can_bulk_and_includes_disabled_sidecar(self):
+        r = self._import([{"id": "huoshan"}, {"id": "legacy-off"}, {"id": "nokey"}])
+        self.assertEqual(sorted(r["imported"]), ["huoshan", "legacy-off", "nokey"])
+        self.assertEqual(sorted(r["providers"]), ["aerolink", "huoshan", "legacy-off", "nokey"])
+
+    def test_import_does_not_touch_the_active_pointer(self):
+        self._import([{"id": "huoshan"}])
+        self.assertEqual(self._doc()["model_provider"], "aerolink")
+
+    def test_import_skips_collisions_unless_overwrite(self):
+        self._add("huoshan", {"name": "Codex 原版", "settings": {"apiKey": "sk-codex"}})
+        r = self._import([{"id": "huoshan", "wireApi": "chat"}])
+        self.assertEqual(r["imported"], [])
+        self.assertEqual(r["skipped"], [{"id": "huoshan", "reason": "codex 侧已存在"}])
+        self.assertEqual(r["providers"]["huoshan"]["settings"]["apiKey"], "sk-codex")  # 原样保留
+
+        r = self._import([{"id": "huoshan", "wireApi": "chat"}], overwrite=True)
+        self.assertEqual(r["imported"], ["huoshan"])
+        self.assertEqual(r["providers"]["huoshan"]["settings"]["apiKey"], "ark-src")
+
+    def test_import_reports_vanished_source(self):
+        r = self._import([{"id": "ghost", "wireApi": "chat"}])
+        self.assertEqual(r["skipped"], [{"id": "ghost", "reason": "opencode 侧已不存在"}])
+
+    def test_import_rejects_bogus_wire_api(self):
+        with self.assertRaises(HTTPException) as cm:
+            self._import([{"id": "huoshan", "wireApi": "grpc"}])
+        self.assertEqual(cm.exception.status_code, 400)
+        self.assertIn("responses", cm.exception.detail)
+
+    def test_import_defaults_wire_api_to_responses(self):
+        """codex-cli 0.155+ 拒绝 wire_api = "chat"（整份配置加载失败），故默认必须是 responses。"""
+        self._import([{"id": "huoshan"}])
+        self.assertEqual(self._doc()["model_providers"]["huoshan"]["wire_api"], "responses")
+
+    def test_import_tolerates_malformed_source_entries(self):
+        broken = {"providers": {"ok": {"name": "Ok", "settings": {"baseURL": "u"}}, "bad": "不是对象"}}
+        self.oc.write_text(json.dumps(broken), encoding="utf-8")
+        self.oc_disabled.unlink()
+        self.assertEqual([i["id"] for i in main.codex_import_candidates()["items"]], ["ok"])
+        self.assertEqual(self._import([{"id": "ok"}])["imported"], ["ok"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

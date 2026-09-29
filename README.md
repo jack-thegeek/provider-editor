@@ -13,6 +13,7 @@
   - OpenCode：名称、Package、API Key、Base URL、Models
   - Codex：名称、API Key、Base URL、Wire API、模型列表（认证方式固定由后端接管，不在界面出现）
 - ➕ 新增 / 📋 复制 / 🗑️ 删除 Provider
+- 📥 **从 OpenCode 导入到 Codex**：Codex 侧栏的导入按钮，勾选后一次性搬过去（可全选）
 - 🌐 从接口拉取模型列表（两个目标都适用）
 - 🎯 **当前生效的模型**：Codex 同时只激活一个模型，卡片里被标记为「当前生效」的那一行即写入顶层 `model` 的值；点其他行的「当前」即可切换
 - 📝 原始编辑器：OpenCode 为 JSON，Codex 为 **config.toml 全文**（含本工具不管理的 mcp_servers / projects 等段）
@@ -53,6 +54,33 @@ python main.py
 
 ---
 
+## 从 OpenCode 导入到 Codex
+
+切到 **Codex** 目标，点侧栏的导入按钮（⬇ 图标），弹窗列出 OpenCode 侧的全部 provider —— 包括 `opencode.json` 里的和停用 sidecar 里的。勾选后一次导入，支持全选。
+
+**字段映射**
+
+| OpenCode | Codex |
+|----------|-------|
+| provider `id` | `[model_providers.<id>]` 段名 |
+| `name` | `name` |
+| `settings.baseURL` | `base_url`（**不改写**） |
+| `settings.apiKey` | 进 `codex.keys.json` 存档，provider 激活时写入 `auth.json` 槽位 |
+| `models` | `codex.models.json` 候选列表 |
+| `package` | 丢弃（codex 没有对应概念） |
+| —— | `requires_openai_auth = true`（后端固定写入，见下节） |
+
+`baseURL` 不用改写：OpenCode 打 `{base}/chat/completions`，Codex 打 `{base}/responses`，两者同构，实测 POST 路径一致。
+
+**几个边界**
+
+- **导入只新增，不动激活指针。** 谁生效是独立的一次决定 —— codex 切换模式下你可能想先导入 18 个再挑一个激活。
+- **同名默认跳过。** 弹窗里已存在的项标「已存在」并置灰；要覆盖得先勾上方的「覆盖同名项」。
+- **`wire_api` 逐项选。** 这是 codex 的概念，OpenCode 侧推断不出来。默认 `responses` —— codex-cli 0.155+ 会直接拒绝 `wire_api = "chat"` 并让整份 `config.toml` 拒绝加载（`wire_api = "chat" is no longer supported`），下拉里那项只留给更老的版本。
+- **key 不经浏览器。** 候选清单只带 `hasKey` 布尔标记，导入时由后端直接从磁盘搬运。
+
+---
+
 ## Codex 侧的三点说明
 
 1. **API Key 的存放方式**（这条踩过坑，结论来自 `codex doctor` + 本地 echo server 实测，不是推测）：
@@ -72,7 +100,7 @@ python main.py
 .venv/bin/python -m unittest test_codex test_codex_api
 ```
 
-41 个用例，全部在临时目录上进行，**不会触碰真实的 `~/.codex` 或 `~/.config/opencode`**。
+52 个用例，全部在临时目录上进行，**不会触碰真实的 `~/.codex` 或 `~/.config/opencode`**。
 
 ---
 
@@ -118,6 +146,8 @@ A cross-platform web editor for managing providers in **OpenCode** (`opencode.js
 - **OpenCode** is coexist-mode: several providers can be enabled at once.
 - **Codex** is switch-mode: all providers coexist as `[model_providers.*]` sections, but the top-level `model_provider` selects exactly one active provider.
 
+**Importing:** the Codex sidebar has an ⬇ button that copies providers from your OpenCode config in one go — id, name, `baseURL` (verbatim), API key and model list. Import only adds sections; it never moves the active pointer. Existing same-name entries are skipped unless you tick "overwrite". `wire_api` defaults to `responses` because codex-cli 0.155+ rejects `wire_api = "chat"` outright and refuses to load the whole config.
+
 ## Quick Start
 
 ```bash
@@ -133,4 +163,4 @@ Open `http://127.0.0.1:7788` in your browser (auto-opened on launch).
 .venv/bin/python -m unittest test_codex test_codex_api
 ```
 
-All 41 cases run against temp directories and never touch your real `~/.codex` or `~/.config/opencode`.
+All 52 cases run against temp directories and never touch your real `~/.codex` or `~/.config/opencode`.

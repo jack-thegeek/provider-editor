@@ -622,6 +622,20 @@
     color: var(--muted);
     flex-shrink: 0;
   }
+  /* 导入清单：已存在 / 无 Key 的角标 + 每行一个 wire_api 下拉 */
+  .imp-tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px; flex: none;
+    background: var(--surface2); color: var(--muted); border: 1px solid var(--border);
+  }
+  .imp-tag.warn { color: #b06a00; border-color: color-mix(in srgb, #b06a00 40%, transparent); }
+  .imp-wire {
+    font-size: 11px; padding: 3px 6px; flex: none; border-radius: 6px;
+    border: 1px solid var(--border-strong); background: var(--bg); color: var(--ink-2);
+  }
+  /* 导入清单：ID 必须完整可读，省略号留给 Base URL */
+  #import-list .pick-id { flex: 0 0 auto; }
+  #import-list .pick-owner { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #import-list .imp-url { flex: 1 1 auto; min-width: 0; }
   .pick-empty {
     padding: 28px;
     text-align: center;
@@ -708,6 +722,8 @@
         <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
         <input id="search-input" type="text" placeholder="搜索 provider…" oninput="renderList()" />
       </div>
+      <button class="btn-icon" id="import-btn" style="display:none" title="从 OpenCode 导入 Provider"
+              onclick="openImportModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
       <button class="btn-icon" title="新增 Provider" onclick="openAddModal()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
     </div>
     <div class="provider-list" id="provider-list"></div>
@@ -746,11 +762,13 @@
             </div>
             <!-- codex 用 Wire API 占 Package 的位置 -->
             <div class="form-row" id="row-wireapi" style="display:none">
-              <!-- 占 Package 的位置：codex 用 wire_api 取代 package -->
+              <!-- 占 Package 的位置：codex 用 wire_api 取代 package。
+                   codex-cli 0.155+ 只接受 responses，选 chat 会让整份 config.toml
+                   直接拒绝加载（"wire_api = \"chat\" is no longer supported"）。 -->
               <label>Wire API</label>
               <select id="f-wireapi">
                 <option value="responses">responses（OpenAI Responses）</option>
-                <option value="chat">chat（Chat Completions）</option>
+                <option value="chat">chat（旧版 codex，新版会加载失败）</option>
               </select>
             </div>
             <!-- codex 的生效模型不再是独立字段，而是下方「模型」卡片里被标记的那一行 -->
@@ -819,6 +837,38 @@
     <div class="modal-actions">
       <button class="btn-sm" onclick="closeAddModal()">取消</button>
       <button class="btn-primary" onclick="confirmAdd()">添加</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Import from OpenCode Modal（仅 codex 目标）── -->
+<div class="overlay" id="import-modal">
+  <div class="modal" style="gap:14px">
+    <div style="display:flex;align-items:center;gap:10px">
+      <h3 style="flex:1"><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>从 OpenCode 导入</h3>
+      <span id="import-spinner" class="spinner" style="display:none"></span>
+    </div>
+    <div style="font-size:12px;color:var(--muted)" id="import-source-label"></div>
+
+    <div class="fetch-search-wrap">
+      <span class="search-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></span>
+      <input id="import-search" type="text" placeholder="搜索 ID / 名称…" oninput="renderImportList()" />
+    </div>
+
+    <div class="fetch-toolbar">
+      <button class="btn-sm" onclick="importToggleAll(true)">全选</button>
+      <button class="btn-sm" onclick="importToggleAll(false)">取消全选</button>
+      <span class="pick-count" id="import-count">0 个</span>
+      <label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:5px;margin-left:auto">
+        <input type="checkbox" id="import-overwrite" style="width:auto" />覆盖同名项
+      </label>
+    </div>
+
+    <div class="model-pick-list" id="import-list" style="max-height:340px"></div>
+
+    <div class="modal-actions">
+      <button class="btn-sm" onclick="closeImportModal()">取消</button>
+      <button class="btn-primary" id="import-confirm-btn" onclick="confirmImport()">导入</button>
     </div>
   </div>
 </div>
@@ -931,6 +981,8 @@ function applyTargetUI() {
   document.getElementById('m-package-row').style.display = codex ? 'none' : '';
   document.getElementById('row-wireapi').style.display = codex ? '' : 'none';
   document.getElementById('raw-tab-label').textContent = codex ? '原始 TOML' : '原始 JSON';
+  // 导入是单向的（opencode → codex），opencode 侧没有对应的出口
+  document.getElementById('import-btn').style.display = codex ? '' : 'none';
 }
 
 // codex 状态：providers + 当前激活项 + 顶层 model
@@ -1592,6 +1644,10 @@ document.getElementById('add-modal').addEventListener('click', function(e) {
   if (e.target === this) closeAddModal();
 });
 
+document.getElementById('import-modal').addEventListener('click', function(e) {
+  if (e.target === this) closeImportModal();
+});
+
 // Keyboard shortcuts
 document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); }
@@ -1708,6 +1764,133 @@ function updatePickCount() {
 function pickToggleAll(checked) {
   document.querySelectorAll('.pick-cb').forEach(cb => cb.checked = checked);
   updatePickCount();
+}
+
+// ════════════════════════════════════════════════
+// 从 OpenCode 导入到 Codex
+// ════════════════════════════════════════════════
+
+// 候选清单来自后端（含 opencode 侧 baseURL / 模型数 / 是否已存在于 codex）。
+// apiKey 不在清单里 —— 导入时由后端直接搬运，凭据不必经浏览器中转。
+let importCandidates = [];
+const importWire = {};   // {id: 'responses' | 'chat'}，opencode 侧推断不出来，逐项选
+
+async function openImportModal() {
+  const list  = document.getElementById('import-list');
+  const spin  = document.getElementById('import-spinner');
+  spin.style.display = 'inline-block';
+  list.innerHTML = '<div class="pick-empty">正在读取 OpenCode 配置…</div>';
+  document.getElementById('import-confirm-btn').disabled = true;
+  document.getElementById('import-modal').classList.add('show');
+  try {
+    const d = await fetch(P('/import-candidates')).then(r => r.json());
+    importCandidates = d.items || [];
+    document.getElementById('import-source-label').textContent = `来源：${d.sourcePath || ''}`;
+    // 默认 responses：codex-cli 0.155+ 直接拒绝 wire_api = "chat"（整份配置都加载不了），
+    // chat 只留给更老的版本，见下拉里的标注。
+    importCandidates.forEach(i => { if (!importWire[i.id]) importWire[i.id] = 'responses'; });
+    document.getElementById('import-search').value = '';
+    document.getElementById('import-overwrite').checked = false;
+    renderImportList();
+  } catch (e) {
+    list.innerHTML = `<div class="pick-empty">读取失败：${escHtml(e.message)}</div>`;
+  } finally {
+    spin.style.display = 'none';
+  }
+}
+
+function closeImportModal() {
+  document.getElementById('import-modal').classList.remove('show');
+}
+
+function renderImportList() {
+  const list  = document.getElementById('import-list');
+  const q     = document.getElementById('import-search').value.toLowerCase();
+  const ow    = document.getElementById('import-overwrite').checked;
+  const items = q
+    ? importCandidates.filter(i => i.id.toLowerCase().includes(q) || i.name.toLowerCase().includes(q))
+    : importCandidates;
+
+  // 重渲染会丢勾选，先记住（key 用 id+'\u0000'+wireApi 区分同一项的两种取值）
+  const prev = new Set([...document.querySelectorAll('.imp-cb:checked')].map(cb => cb.dataset.key));
+
+  if (items.length === 0) {
+    list.innerHTML = importCandidates.length === 0
+      ? '<div class="pick-empty">OpenCode 配置里没有 provider</div>'
+      : '<div class="pick-empty">无匹配结果</div>';
+    document.getElementById('import-count').textContent = '0 个';
+    return;
+  }
+
+  list.innerHTML = '';
+  items.forEach(i => {
+    const wire = importWire[i.id] || 'responses';
+    const key  = i.id + '\u0000' + wire;
+    const row  = document.createElement('div');
+    row.className = 'model-pick-item';
+    // 同名项默认不勾；要覆盖得先勾上方的「覆盖同名项」
+    const blocked = i.exists && !ow;
+    row.innerHTML = `
+      <input type="checkbox" class="imp-cb" data-id="${escHtml(i.id)}" data-key="${escHtml(key)}"
+             ${prev.has(key) && !blocked ? 'checked' : ''} ${blocked ? 'disabled' : ''}
+             onchange="updateImportCount()" />
+      <span class="pick-id" style="${blocked ? 'opacity:.5' : ''}">${escHtml(i.id)}</span>
+      <span class="pick-owner">${escHtml(i.name)}</span>
+      ${i.exists ? '<span class="imp-tag">已存在</span>' : ''}
+      ${i.hasKey ? '' : '<span class="imp-tag warn">无 Key</span>'}
+      <span class="pick-owner imp-url" style="margin-left:auto;font-size:11px;opacity:.7">${escHtml(i.baseURL || '—')}</span>
+      <select class="imp-wire" title="codex 调用上游用的接口协议" onchange="importWire['${escHtml(i.id)}']=this.value;renderImportList()">
+        <option value="responses" ${wire === 'responses' ? 'selected' : ''}>responses</option>
+        <option value="chat"     ${wire === 'chat'     ? 'selected' : ''}>chat（旧版）</option>
+      </select>
+    `;
+    list.appendChild(row);
+  });
+
+  document.getElementById('import-count').textContent = `共 ${items.length} 个`;
+  updateImportCount();
+}
+
+function updateImportCount() {
+  const n = document.querySelectorAll('.imp-cb:checked').length;
+  document.getElementById('import-confirm-btn').disabled = (n === 0);
+  document.getElementById('import-count').textContent =
+    `${n} 个已选 / 共 ${importCandidates.length} 个`;
+}
+
+function importToggleAll(checked) {
+  document.querySelectorAll('.imp-cb:not(:disabled)').forEach(cb => cb.checked = checked);
+  updateImportCount();
+}
+
+async function confirmImport() {
+  const btn = document.getElementById('import-confirm-btn');
+  const items = [...document.querySelectorAll('.imp-cb:checked')].map(cb => ({
+    id: cb.dataset.id,
+    wireApi: importWire[cb.dataset.id] || 'responses',
+  }));
+  if (items.length === 0) return;
+  btn.disabled = true;
+  try {
+    const r = await fetch(P('/import'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, overwrite: document.getElementById('import-overwrite').checked }),
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || JSON.stringify(d));
+    closeImportModal();
+    applyCodexState(d);
+    activeId = d.imported?.[0] || activeId;
+    renderList();
+    loadProvider(activeId);
+    const skipped = d.skipped?.length ? `，跳过 ${d.skipped.length} 个` : '';
+    showToast(`已导入 ${d.imported?.length || 0} 个${skipped}`, 'success');
+  } catch (e) {
+    showToast('导入失败: ' + e.message, 'error');
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function confirmFetchModels() {

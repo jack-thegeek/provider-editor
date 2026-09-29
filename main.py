@@ -325,6 +325,96 @@ def codex_delete_provider(provider_id: str):
     return _codex_save(state["providers"], state["active"], state["model"])
 
 
+# ---------------------------------------------------------------------------
+# 从 opencode 导入到 codex
+# ---------------------------------------------------------------------------
+
+def _opencode_providers() -> dict[str, Any]:
+    """opencode 侧的全部 provider（启用的 + 停用 sidecar 里的）。"""
+    return {**_read_config().get("providers", {}), **_read_disabled()}
+
+
+@app.get("/api/codex/import-candidates")
+def codex_import_candidates():
+    """可导入的 opencode provider 清单。
+
+    不返回 apiKey —— 导入时由后端直接搬运，凭据不必经浏览器中转。
+    """
+    existing = codex_cfg.read_state()["providers"]
+    items = []
+    for pid, p in _opencode_providers().items():
+        if not isinstance(p, dict):
+            continue
+        settings = p.get("settings") or {}
+        items.append({
+            "id": pid,
+            "name": (p.get("name") or "").strip() or pid,
+            "package": (p.get("package") or "").strip(),
+            "baseURL": (settings.get("baseURL") or "").strip(),
+            "modelCount": len(p.get("models") or {}),
+            "hasKey": bool((settings.get("apiKey") or "").strip()),
+            "exists": pid in existing,
+        })
+    items.sort(key=lambda i: i["id"])
+    return {"items": items, "sourcePath": str(CONFIG_PATH)}
+
+
+@app.post("/api/codex/import")
+async def codex_import(request: Request):
+    """把选中的 opencode provider 搬进 codex。
+
+    字段映射：name / baseURL→base_url / apiKey→key 归档 / models→模型 sidecar，
+    都是直传。baseURL 不用改写 —— opencode 打 {base}/chat/completions，codex 打
+    {base}/responses，同构。
+
+    wire_api 无法从 opencode 侧推断（那是 codex 的概念），故由调用方逐项指定。
+    默认 responses —— codex-cli 0.155+ 直接拒绝 wire_api = "chat"，
+    写进去整份 config.toml 都加载不了，chat 只留给更老的版本。
+
+    导入只新增，不动激活指针：codex 切换模式下「谁生效」是独立的一次决定。
+    """
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+
+    src = _opencode_providers()
+    state = codex_cfg.read_state()
+    imported, skipped = [], []
+    # 覆盖开关：顶层统一开，或单项开（单项优先，用于「只覆盖这一个」）
+    overwrite_all = bool(body.get("overwrite"))
+    for item in body.get("items") or []:
+        pid = (item.get("id") or "").strip()
+        if not pid:
+            continue
+        origin = src.get(pid)
+        if not isinstance(origin, dict):
+            skipped.append({"id": pid, "reason": "opencode 侧已不存在"})
+            continue
+        if pid in state["providers"] and not (overwrite_all or item.get("overwrite")):
+            skipped.append({"id": pid, "reason": "codex 侧已存在"})
+            continue
+        settings = origin.get("settings") or {}
+        wire_api = (item.get("wireApi") or "").strip() or "responses"
+        if wire_api not in ("responses", "chat"):
+            raise HTTPException(status_code=400, detail=f"wireApi 只能是 responses 或 chat，收到 {wire_api!r}")
+        state["providers"][pid] = {
+            "name": (origin.get("name") or "").strip() or pid,
+            "settings": {
+                "baseURL": (settings.get("baseURL") or "").strip(),
+                "apiKey": (settings.get("apiKey") or "").strip(),
+                "wireApi": wire_api,
+            },
+            "models": origin.get("models") or {},
+        }
+        imported.append(pid)
+
+    result = _codex_save(state["providers"], state["active"], state["model"])
+    result["imported"] = imported
+    result["skipped"] = skipped
+    return result
+
+
 class ProxyModelsRequest(BaseModel):
     baseURL: str
     apiKey: str = ""
