@@ -8,5 +8,6 @@ ENV/
 .env
 .DS_Store
 .codegraph/
+.serena/
 build/
 dist/
