@@ -925,7 +925,7 @@
 
     <div class="modal-actions">
       <button class="btn-sm" onclick="closeFetchModal()">取消</button>
-      <button class="btn-primary" onclick="confirmFetchModels()" id="pick-confirm-btn" disabled>添加选中模型</button>
+      <button class="btn-primary" onclick="confirmFetchModels()" id="pick-confirm-btn" title="以勾选结果覆盖当前 Provider 的模型列表" disabled>应用所选模型</button>
     </div>
   </div>
 </div>
@@ -1659,6 +1659,8 @@ document.addEventListener('keydown', e => {
 // ════════════════════════════════════════════════
 let fetchedModels = [];   // full list from API
 let filteredModels = [];  // after search filter
+let pickedIds = new Set(); // 弹窗内已勾选的模型 ID（跨搜索/重渲染保持）
+let pickSeeded = false;   // 本次弹窗是否已用「当前已有模型」初始化过勾选
 
 function openFetchModal() {
   const baseURL = document.getElementById('f-baseurl').value.trim();
@@ -1668,6 +1670,8 @@ function openFetchModal() {
   }
   document.getElementById('fetch-url-label').textContent = `接口：${baseURL}/models`;
   document.getElementById('fetch-search').value = '';
+  pickedIds = new Set();
+  pickSeeded = false;
   document.getElementById('fetch-modal').classList.add('show');
   fetchModels(baseURL);
 }
@@ -1700,6 +1704,8 @@ async function fetchModels(baseURL) {
       .filter(m => m.id)
       .sort((a, b) => a.id.localeCompare(b.id));
 
+    pickSeeded = false;  // 新抓取的列表：下一次渲染时按当前已有模型回填勾选
+    pickedIds = new Set();
     filterPickList();
     showToast(`获取到 ${fetchedModels.length} 个模型`, 'success');
   } catch(e) {
@@ -1720,50 +1726,70 @@ function filterPickList() {
 
 function renderPickList() {
   const list = document.getElementById('model-pick-list');
-  const confirmBtn = document.getElementById('pick-confirm-btn');
 
   if (filteredModels.length === 0) {
     list.innerHTML = fetchedModels.length === 0
       ? '<div class="pick-empty">暂无数据</div>'
       : '<div class="pick-empty">无匹配结果</div>';
-    confirmBtn.disabled = true;
-    document.getElementById('pick-count').textContent = '0 个模型';
+    document.getElementById('pick-count').textContent = fetchedModels.length === 0 ? '0 个模型' : '共 0 个';
+    updatePickCount();
     return;
   }
 
-  // Get currently checked model IDs (preserve across re-render)
-  const prevChecked = new Set(
-    [...document.querySelectorAll('.pick-cb:checked')].map(cb => cb.dataset.id)
-  );
+  // 首次渲染：把当前 Provider 已有模型（模型卡片里的行）一并勾上
+  if (!pickSeeded) {
+    document.querySelectorAll('.model-row .model-id').forEach(el => {
+      const id = el.value.trim();
+      if (id) pickedIds.add(id);
+    });
+    pickSeeded = true;
+  }
 
   list.innerHTML = '';
   filteredModels.forEach(m => {
     const item = document.createElement('label');
     item.className = 'model-pick-item';
-    const checked = prevChecked.has(m.id);
-    item.innerHTML = `
-      <input type="checkbox" class="pick-cb" data-id="${escHtml(m.id)}" ${checked ? 'checked' : ''} onchange="updatePickCount()" />
-      <span class="pick-id">${escHtml(m.id)}</span>
-      ${m.owned_by ? `<span class="pick-owner">${escHtml(m.owned_by)}</span>` : ''}
-    `;
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.className = 'pick-cb';
+    cb.dataset.id = m.id;
+    cb.checked = pickedIds.has(m.id);
+    // 勾选状态记进 pickedIds，搜索过滤后重渲染也不会丢
+    cb.onchange = () => {
+      if (cb.checked) pickedIds.add(m.id); else pickedIds.delete(m.id);
+      updatePickCount();
+    };
+    item.appendChild(cb);
+
+    const idSpan = document.createElement('span');
+    idSpan.className = 'pick-id';
+    idSpan.textContent = m.id;
+    item.appendChild(idSpan);
+
+    if (m.owned_by) {
+      const owner = document.createElement('span');
+      owner.className = 'pick-owner';
+      owner.textContent = m.owned_by;
+      item.appendChild(owner);
+    }
     list.appendChild(item);
   });
 
   document.getElementById('pick-count').textContent = `共 ${filteredModels.length} 个`;
-  confirmBtn.disabled = false;
   updatePickCount();
 }
 
 function updatePickCount() {
-  const n = document.querySelectorAll('.pick-cb:checked').length;
+  const n = pickedIds.size;
   const el = document.getElementById('pick-selected-count');
   el.textContent = n > 0 ? `已选 ${n} 个` : '';
   document.getElementById('pick-confirm-btn').disabled = (n === 0);
 }
 
 function pickToggleAll(checked) {
-  document.querySelectorAll('.pick-cb').forEach(cb => cb.checked = checked);
-  updatePickCount();
+  filteredModels.forEach(m => { checked ? pickedIds.add(m.id) : pickedIds.delete(m.id); });
+  renderPickList();
 }
 
 // ════════════════════════════════════════════════
@@ -1894,24 +1920,33 @@ async function confirmImport() {
 }
 
 function confirmFetchModels() {
-  const checked = [...document.querySelectorAll('.pick-cb:checked')].map(cb => cb.dataset.id);
+  const checked = [...pickedIds];
   if (checked.length === 0) return;
 
-  // Get existing model IDs to avoid duplicates
-  const existing = new Set(
-    [...document.querySelectorAll('.model-row .model-id')].map(el => el.value.trim())
-  );
-  const container = document.getElementById('models-container');
-  let added = 0;
-  checked.forEach(id => {
-    if (!existing.has(id)) {
-      container.appendChild(makeModelRow(id, ''));
-      added++;
-    }
+  // 保留已有行的别名；新勾选的用空别名
+  const prevName = {};
+  document.querySelectorAll('.model-row').forEach(row => {
+    const id = row.querySelector('.model-id').value.trim();
+    if (id) prevName[id] = row.querySelector('.model-name').value.trim();
   });
-  updateModelCount();
+
+  // 以勾选结果为准重建模型列表
+  const models = {};
+  checked.forEach(id => { models[id] = prevName[id] ? { name: prevName[id] } : {}; });
+  const finalModels = isCodex() ? withCurrentModel(models) : models;
+
+  const before = new Set(Object.keys(prevName));
+  const after  = new Set(Object.keys(finalModels));
+  const added   = [...after].filter(id => !before.has(id)).length;
+  const removed = [...before].filter(id => !after.has(id)).length;
+
+  renderModels(finalModels);
   closeFetchModal();
-  showToast(`已添加 ${added} 个模型${added < checked.length ? `（${checked.length - added} 个已存在）` : ''}`, 'success');
+
+  const parts = [];
+  if (added)   parts.push(`新增 ${added} 个`);
+  if (removed) parts.push(`移除 ${removed} 个`);
+  showToast(parts.length ? `已按勾选结果更新模型（${parts.join('，')}）` : '模型列表无变化', 'success');
 }
 
 // ════════════════════════════════════════════════
