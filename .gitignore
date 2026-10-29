@@ -9,5 +9,6 @@ ENV/
 .DS_Store
 .codegraph/
 .serena/
+.idea/
 build/
 dist/
