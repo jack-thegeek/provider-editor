@@ -7,6 +7,7 @@ import json
 import shutil
 import socket
 import sys
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -444,6 +445,95 @@ def proxy_models(req: ProxyModelsRequest):
         raise HTTPException(status_code=502, detail=f"无法连接: {e.reason}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ProxyTestRequest(BaseModel):
+    baseURL: str
+    apiKey: str = ""
+    model: str
+    wireApi: str = "chat"   # 'chat' | 'responses'
+
+
+def _upstream_error(raw: str) -> str:
+    """从上游错误响应里挖出人能看懂的一句话。"""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return (raw or "未知错误").strip()[:300]
+    err = data.get("error") if isinstance(data, dict) else None
+    if isinstance(err, dict):
+        return str(err.get("message") or err)[:300]
+    if isinstance(err, str):
+        return err[:300]
+    return str(data)[:300]
+
+
+def _reply_text(raw: str) -> str:
+    """从成功响应里取出模型回复（两种 wire api 各自的结构）。"""
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    if isinstance(data.get("output_text"), str):
+        return data["output_text"][:120]
+    for item in data.get("output") or []:
+        for part in (item.get("content") or []) if isinstance(item, dict) else []:
+            if isinstance(part, dict) and part.get("text"):
+                return str(part["text"])[:120]
+    choices = data.get("choices") or []
+    if choices and isinstance(choices[0], dict):
+        msg = choices[0].get("message") or {}
+        if msg.get("content"):
+            return str(msg["content"])[:120]
+    return ""
+
+
+@app.post("/api/proxy/test")
+def proxy_test(req: ProxyTestRequest):
+    """用最小请求测一个模型：能不能用、多快。
+
+    服务端发起（和 /api/proxy/models 一样为了绕开 CORS），失败也算测试结果，
+    所以除参数缺失外一律返回 200，用 ok 字段区分成败。
+    """
+    base = req.baseURL.rstrip("/")
+    if not base:
+        raise HTTPException(status_code=400, detail="缺少 Base URL")
+    if not req.model.strip():
+        raise HTTPException(status_code=400, detail="缺少 Model ID")
+
+    prompt = "Reply with one word: ok"
+    if req.wireApi == "responses":
+        url = f"{base}/responses"
+        payload: dict[str, Any] = {"model": req.model, "input": prompt, "stream": False}
+    else:
+        url = f"{base}/chat/completions"
+        payload = {"model": req.model, "messages": [{"role": "user", "content": prompt}], "stream": False}
+
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if req.apiKey:
+        headers["Authorization"] = f"Bearer {req.apiKey}"
+
+    request = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+    )
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(request, timeout=60) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            ms = round((time.perf_counter() - t0) * 1000)
+            return {"ok": True, "ms": ms, "status": resp.status, "reply": _reply_text(raw)}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        ms = round((time.perf_counter() - t0) * 1000)
+        return {"ok": False, "ms": ms, "status": e.code, "detail": _upstream_error(body)}
+    except urllib.error.URLError as e:
+        ms = round((time.perf_counter() - t0) * 1000)
+        return {"ok": False, "ms": ms, "status": 0, "detail": f"无法连接: {e.reason}"}
+    except Exception as e:
+        ms = round((time.perf_counter() - t0) * 1000)
+        return {"ok": False, "ms": ms, "status": 0, "detail": str(e)}
 
 
 @app.post("/api/shutdown")

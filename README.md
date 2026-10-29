@@ -15,6 +15,7 @@
 - ➕ 新增 / 📋 复制 / 🗑️ 删除 Provider
 - 📥 **从 OpenCode 导入到 Codex**：Codex 侧栏的导入按钮，勾选后一次性搬过去（可全选）
 - 🌐 从接口拉取模型列表（两个目标都适用）
+- ⚡ **模型可用性测试**：模型行上的 ⚡ 按钮，用最小请求测该模型能不能用、响应多快（走服务端代理，绕开 CORS）
 - 🎯 **当前生效的模型**：Codex 同时只激活一个模型，卡片里被标记为「当前生效」的那一行即写入顶层 `model` 的值；点其他行的「当前」即可切换
 - 📝 原始编辑器：OpenCode 为 JSON，Codex 为 **config.toml 全文**（含本工具不管理的 mcp_servers / projects 等段）
 - 💾 写入前自动备份（`.bak`）+ 语法校验（TOML 由服务端 `tomllib` 校验后才落盘）
@@ -97,10 +98,10 @@ python main.py
 ## 测试
 
 ```bash
-.venv/bin/python -m unittest test_codex test_codex_api
+.venv/bin/python -m unittest test_codex test_codex_api test_proxy_test
 ```
 
-52 个用例，全部在临时目录上进行，**不会触碰真实的 `~/.codex` 或 `~/.config/opencode`**。
+59 个用例，全部在临时目录或桩上进行，**不会触碰真实的 `~/.codex` 或 `~/.config/opencode`**，也不会发真实网络请求。
 
 ---
 
@@ -160,7 +161,7 @@ Open `http://127.0.0.1:7788` in your browser (auto-opened on launch).
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest test_codex test_codex_api
+.venv/bin/python -m unittest test_codex test_codex_api test_proxy_test
 ```
 
-All 52 cases run against temp directories and never touch your real `~/.codex` or `~/.config/opencode`.
+All 59 cases run against temp directories or stubs and never touch your real `~/.codex`, `~/.config/opencode`, or the network.
