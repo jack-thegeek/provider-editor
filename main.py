@@ -451,7 +451,7 @@ class ProxyTestRequest(BaseModel):
     baseURL: str
     apiKey: str = ""
     model: str
-    wireApi: str = "chat"   # 'chat' | 'responses'
+    wireApi: str = "chat"   # 'chat' | 'responses' | 'anthropic'
 
 
 def _upstream_error(raw: str) -> str:
@@ -490,6 +490,42 @@ def _reply_text(raw: str) -> str:
     return ""
 
 
+def _sse_text(data: Any) -> str:
+    """从一条 SSE data 里抠出增量文本（Anthropic 与 OpenAI 两种形状都认）。"""
+    if not isinstance(data, dict):
+        return ""
+    delta = data.get("delta")
+    if isinstance(delta, dict) and delta.get("text"):
+        return str(delta["text"])
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        d = choices[0].get("delta") or {}
+        if d.get("content"):
+            return str(d["content"])
+    return ""
+
+
+def _read_sse(resp, t0: float) -> tuple[int, int, str]:
+    """读 SSE 流，返回 (首字节ms, 总耗时ms, 拼起来的回复)。"""
+    first_ms: int | None = None
+    parts: list[str] = []
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        chunk = line[5:].strip()
+        if not chunk or chunk == "[DONE]":
+            continue
+        try:
+            data = json.loads(chunk)
+        except Exception:
+            continue
+        if first_ms is None:
+            first_ms = round((time.perf_counter() - t0) * 1000)
+        parts.append(_sse_text(data))
+    return first_ms, round((time.perf_counter() - t0) * 1000), "".join(parts)[:120]
+
+
 @app.post("/api/proxy/test")
 def proxy_test(req: ProxyTestRequest):
     """用最小请求测一个模型：能不能用、多快。
@@ -504,14 +540,30 @@ def proxy_test(req: ProxyTestRequest):
         raise HTTPException(status_code=400, detail="缺少 Model ID")
 
     prompt = "Reply with one word: ok"
-    if req.wireApi == "responses":
+    if req.wireApi == "anthropic":
+        # Anthropic Messages 协议：{base}/messages + anthropic-version 头
+        url = f"{base}/messages"
+        payload: dict[str, Any] = {
+            "model": req.model,
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": prompt}],
+            "stream": True,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "anthropic-version": "2023-06-01",
+        }
+    elif req.wireApi == "responses":
         url = f"{base}/responses"
-        payload: dict[str, Any] = {"model": req.model, "input": prompt, "stream": False}
+        payload = {"model": req.model, "input": prompt, "stream": False}
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
     else:
         url = f"{base}/chat/completions"
         payload = {"model": req.model, "messages": [{"role": "user", "content": prompt}], "stream": False}
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
 
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    # 只发 Bearer：实测部分中转站对 x-api-key 头敏感（大小写不同就断连）
     if req.apiKey:
         headers["Authorization"] = f"Bearer {req.apiKey}"
 
@@ -520,10 +572,13 @@ def proxy_test(req: ProxyTestRequest):
     )
     t0 = time.perf_counter()
     try:
-        with urllib.request.urlopen(request, timeout=60) as resp:
+        with urllib.request.urlopen(request, timeout=180) as resp:
+            if req.wireApi == "anthropic":
+                first_ms, ms, reply = _read_sse(resp, t0)
+                return {"ok": True, "ms": ms, "ttfbMs": first_ms, "status": resp.status, "reply": reply}
             raw = resp.read().decode("utf-8", errors="replace")
             ms = round((time.perf_counter() - t0) * 1000)
-            return {"ok": True, "ms": ms, "status": resp.status, "reply": _reply_text(raw)}
+            return {"ok": True, "ms": ms, "ttfbMs": ms, "status": resp.status, "reply": _reply_text(raw)}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         ms = round((time.perf_counter() - t0) * 1000)

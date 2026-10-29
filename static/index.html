@@ -765,7 +765,13 @@
             </div>
             <div class="form-row" id="row-package">
               <label>Package</label>
-              <input id="f-package" type="text" class="wide" value="@opencode/ai/providers/openai-compatible" />
+              <input id="f-package" type="text" class="wide" list="pkg-options" value="@opencode/ai/providers/openai-compatible" />
+              <!-- package 决定协议：anthropic 走 Claude 原生的 /messages -->
+              <datalist id="pkg-options">
+                <option value="@opencode/ai/providers/openai-compatible"></option>
+                <option value="@opencode/ai/providers/anthropic"></option>
+                <option value="@opencode/ai/providers/anthropic-compatible"></option>
+              </datalist>
             </div>
             <!-- codex 用 Wire API 占 Package 的位置 -->
             <div class="form-row" id="row-wireapi" style="display:none">
@@ -838,7 +844,7 @@
     <h3><svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新增 Provider</h3>
     <div class="form-row"><label>ID（键名）</label><input id="m-id" type="text" placeholder="my-provider" /></div>
     <div class="form-row"><label>名称</label><input id="m-name" type="text" placeholder="My Provider" /></div>
-    <div class="form-row" id="m-package-row"><label>Package</label><input id="m-package" type="text" value="@opencode/ai/providers/openai-compatible" /></div>
+    <div class="form-row" id="m-package-row"><label>Package</label><input id="m-package" type="text" list="pkg-options" value="@opencode/ai/providers/openai-compatible" /></div>
     <div class="form-row"><label>API Key</label><input id="m-apikey" type="text" placeholder="sk-…" /></div>
     <div class="form-row"><label>Base URL</label><input id="m-baseurl" type="text" placeholder="https://…/v1" /></div>
     <div class="modal-actions">
@@ -1190,6 +1196,14 @@ function makeModelRow(modelId, displayName) {
   return row;
 }
 
+// 当前 provider 走哪套协议：codex 看 wire_api，opencode 看 package
+// （@opencode/ai/providers/anthropic 与 anthropic-compatible 都是 Claude 原生的 /messages）
+function providerWireApi() {
+  if (isCodex()) return document.getElementById('f-wireapi').value;
+  const pkg = document.getElementById('f-package').value.trim().toLowerCase();
+  return pkg.includes('anthropic') ? 'anthropic' : 'chat';
+}
+
 // 用最小请求测一个模型：能否用 + 响应耗时
 async function testModel(btn) {
   const row   = btn.closest('.model-row');
@@ -1202,7 +1216,7 @@ async function testModel(btn) {
     baseURL,
     apiKey:  document.getElementById('f-apikey').value.trim(),
     model,
-    wireApi: isCodex() ? document.getElementById('f-wireapi').value : 'chat',
+    wireApi: providerWireApi(),
   };
 
   btn.disabled = true;
@@ -1217,7 +1231,8 @@ async function testModel(btn) {
     if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
     if (data.ok) {
       btn.classList.add('ok');
-      showToast(`${model} 可用 · ${data.ms}ms${data.reply ? ' · ' + data.reply : ''}`, 'success', 5000);
+      const ttfb = data.ttfbMs && data.ttfbMs !== data.ms ? `首字 ${data.ttfbMs}ms · ` : '';
+      showToast(`${model} 可用 · ${ttfb}共 ${data.ms}ms${data.reply ? ' · ' + data.reply : ''}`, 'success', 5000);
     } else {
       btn.classList.add('bad');
       showToast(`${model} 不可用（${data.status || '连接失败'}）：${data.detail}`, 'error', 6000);

@@ -16,6 +16,8 @@
 - 📥 **从 OpenCode 导入到 Codex**：Codex 侧栏的导入按钮，勾选后一次性搬过去（可全选）
 - 🌐 从接口拉取模型列表（两个目标都适用）
 - ⚡ **模型可用性测试**：模型行上的 ⚡ 按钮，用最小请求测该模型能不能用、响应多快（走服务端代理，绕开 CORS）
+  - 协议自动判定：Codex 看 `wire_api`；OpenCode 看 `package` —— 含 `anthropic` 走 Claude 原生 `/messages`，否则走 OpenAI 兼容 `/chat/completions`
+  - Anthropic 走流式，能同时拿到**首字延迟**与总耗时
 - 🎯 **当前生效的模型**：Codex 同时只激活一个模型，卡片里被标记为「当前生效」的那一行即写入顶层 `model` 的值；点其他行的「当前」即可切换
 - 📝 原始编辑器：OpenCode 为 JSON，Codex 为 **config.toml 全文**（含本工具不管理的 mcp_servers / projects 等段）
 - 💾 写入前自动备份（`.bak`）+ 语法校验（TOML 由服务端 `tomllib` 校验后才落盘）
@@ -54,6 +56,46 @@ python main.py
 端口被占用时会自动往后递增。
 
 ---
+
+## Anthropic 协议支持
+
+OpenCode 侧用 `package` 决定协议，`@opencode/ai/providers/anthropic` 与 `@opencode/ai/providers/anthropic-compatible` 都是 Claude 原生格式：
+
+```jsonc
+{
+  "providers": {
+    "nexo-claude": {
+      "package": "@opencode/ai/providers/anthropic",
+      "settings": {
+        "baseURL": "https://www.nexotoken.top/v1",
+        "apiKey": "sk-…"
+      },
+      "models": { "claude-sonnet-5-5": {} }
+    }
+  }
+}
+```
+
+⚡ 测试按钮会自动识别，发的请求等价于：
+
+```bash
+curl --fail-with-body -N --max-time 180 https://www.nexotoken.top/v1/messages \
+  -H "Authorization: Bearer $KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude-sonnet-5-5","max_tokens":1024,
+       "messages":[{"role":"user","content":"Reply with one word: ok"}],"stream":true}'
+```
+
+几个要点：
+
+- **认证只发 `Authorization: Bearer`**。实测部分中转站对 `x-api-key` 头敏感 —— urllib 会把头名 capitalize 成 `X-api-key`，网关没命中就直接 TLS 断连（`UNEXPECTED_EOF_WHILE_READING`），curl 发小写则正常。故不发 `x-api-key`；这意味着**官方 `api.anthropic.com` 暂不支持**（它只认 `x-api-key`）。
+- **`baseURL` 要自带 `/v1`**，端点是 `{base}/messages`。
+- **`stream: true`**：读 SSE 流，第一个 `data:` 行的时间即首字延迟，结尾给出总耗时。
+- Codex 侧不支持 anthropic —— codex 的 `wire_api` 只有 `responses` 与 `chat`。
+
+---
+
 
 ## 从 OpenCode 导入到 Codex
 
@@ -101,7 +143,7 @@ python main.py
 .venv/bin/python -m unittest test_codex test_codex_api test_proxy_test
 ```
 
-59 个用例，全部在临时目录或桩上进行，**不会触碰真实的 `~/.codex` 或 `~/.config/opencode`**，也不会发真实网络请求。
+62 个用例，全部在临时目录或桩上进行，**不会触碰真实的 `~/.codex` 或 `~/.config/opencode`**，也不会发真实网络请求。
 
 ---
 
@@ -164,4 +206,4 @@ Open `http://127.0.0.1:7788` in your browser (auto-opened on launch).
 .venv/bin/python -m unittest test_codex test_codex_api test_proxy_test
 ```
 
-All 59 cases run against temp directories or stubs and never touch your real `~/.codex`, `~/.config/opencode`, or the network.
+All 62 cases run against temp directories or stubs and never touch your real `~/.codex`, `~/.config/opencode`, or the network.

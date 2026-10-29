@@ -21,11 +21,35 @@ class FakeResponse:
     def read(self):
         return self._body
 
+    def __iter__(self):
+        return iter(self._body.splitlines(keepends=True))
+
     def __enter__(self):
         return self
 
     def __exit__(self, *exc):
         return False
+
+
+def header(req, name):
+    """urllib 会把头名 capitalize（x-api-key → X-api-key），统一小写再取。"""
+    return {k.lower(): v for k, v in req.headers.items()}.get(name.lower())
+
+
+ANTHROPIC_SSE = [
+    b'event: message_start\n',
+    b'data: {"type":"message_start","message":{"id":"msg_1"}}\n',
+    b'\n',
+    b'event: content_block_start\n',
+    b'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n',
+    b'\n',
+    b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}\n',
+    b'\n',
+    b'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" there"}}\n',
+    b'\n',
+    b'event: message_stop\n',
+    b'data: {"type":"message_stop"}\n',
+]
 
 
 class ProxyTestTest(unittest.TestCase):
@@ -118,6 +142,55 @@ class ProxyTestTest(unittest.TestCase):
         with self.assertRaises(HTTPException) as ctx:
             self._run(model="  ")
         self.assertEqual(ctx.exception.status_code, 400)
+
+    # ── Anthropic Messages 协议 ──
+    def test_anthropic_request_shape(self):
+        seen = {}
+
+        def fake_urlopen(req, timeout=None):
+            seen["url"] = req.full_url
+            seen["payload"] = json.loads(req.data.decode("utf-8"))
+            seen["headers"] = {k.lower(): v for k, v in req.headers.items()}
+            seen["timeout"] = timeout
+            return FakeResponse(json.dumps({"content": [{"type": "text", "text": "ok"}]}))
+
+        with mock.patch.object(main.urllib.request, "urlopen", fake_urlopen):
+            r = self._run(wireApi="anthropic")
+
+        self.assertTrue(r["ok"])
+        self.assertEqual(seen["url"], "https://example.test/v1/messages")
+        self.assertEqual(seen["headers"]["authorization"], "Bearer sk-x")
+        self.assertEqual(seen["headers"]["anthropic-version"], "2023-06-01")
+        self.assertEqual(seen["payload"]["model"], "gpt-4o")
+        self.assertEqual(seen["payload"]["max_tokens"], 1024)
+        self.assertTrue(seen["payload"]["stream"])
+        self.assertEqual(seen["payload"]["messages"][0]["role"], "user")
+
+    def test_anthropic_reads_sse(self):
+        def fake_urlopen(req, timeout=None):
+            return FakeResponse("\n".join(x.decode() for x in ANTHROPIC_SSE))
+
+        with mock.patch.object(main.urllib.request, "urlopen", fake_urlopen):
+            r = self._run(wireApi="anthropic")
+
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["reply"], "Hello there")
+        self.assertGreaterEqual(r["ttfbMs"], 0)
+        self.assertGreaterEqual(r["ms"], r["ttfbMs"])
+
+    def test_anthropic_http_error(self):
+        def fake_urlopen(req, timeout=None):
+            raise HTTPError(
+                req.full_url, 400, "Bad Request", {},
+                io.BytesIO(b'{"type":"error","error":{"type":"invalid_request_error","message":"bad model"}}'),
+            )
+
+        with mock.patch.object(main.urllib.request, "urlopen", fake_urlopen):
+            r = self._run(wireApi="anthropic")
+
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["status"], 400)
+        self.assertEqual(r["detail"], "bad model")
 
 
 if __name__ == "__main__":
